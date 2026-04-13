@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from app_settings import (
+    BUY_CHECK_INTERVAL_SECONDS,
     DEBUG_EXECUTION_MODE,
     DEBUG_FORCE_RUN_WHEN_MARKET_CLOSED,
     ENABLE_DB_RETENTION_CLEANUP,
@@ -129,6 +130,16 @@ def _ensure_runtime_migrations(conn: sqlite3.Connection) -> None:
     if "realized_pnl_amount" not in order_log_cols:
         conn.execute("ALTER TABLE order_logs ADD COLUMN realized_pnl_amount REAL")
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_state (
+            state_key TEXT PRIMARY KEY,
+            state_value TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+        """
+    )
+
 
 def initialize_database() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +169,44 @@ def _to_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_runtime_state_value(db_path: Path, state_key: str) -> str:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT state_value
+            FROM runtime_state
+            WHERE state_key = ?
+            LIMIT 1
+            """,
+            (state_key,),
+        ).fetchone()
+    if not row:
+        return ""
+    return str(row[0] or "")
+
+
+def _set_runtime_state_value(db_path: Path, state_key: str, state_value: str) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO runtime_state (state_key, state_value, updated_at)
+            VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            ON CONFLICT(state_key) DO UPDATE SET
+                state_value = excluded.state_value,
+                updated_at = excluded.updated_at
+            """,
+            (state_key, state_value),
+        )
+        conn.commit()
 
 
 def _status_text(ok: bool | None) -> str:
@@ -363,7 +412,25 @@ def run_once() -> dict[str, Any]:
     log_step(f"ExitFlow完了: checked={exit_result.get('checked', 0)} sold={exit_result.get('sold', 0)}")
 
     log_section("Entry Flow")
-    if run_entry_enabled:
+    now_epoch = time.time()
+    last_buy_check_at_raw = _get_runtime_state_value(DB_PATH, "last_buy_check_at")
+    last_buy_check_at_epoch = _to_float(last_buy_check_at_raw, 0.0)
+    next_buy_due_epoch = last_buy_check_at_epoch + float(BUY_CHECK_INTERVAL_SECONDS)
+    buy_interval_ready = (last_buy_check_at_epoch <= 0.0) or (now_epoch >= next_buy_due_epoch)
+
+    if run_entry_enabled and not buy_interval_ready:
+        wait_sec = max(next_buy_due_epoch - now_epoch, 0.0)
+        log_step(
+            "EntryFlow: BUY間隔ゲートによりスキップ "
+            f"(interval={BUY_CHECK_INTERVAL_SECONDS}s next_in={round(wait_sec, 1)}s)"
+        )
+        entry_result = {
+            "note": "skipped_by_buy_interval",
+            "bought": 0,
+            "rejected_count": 0,
+            "next_buy_in_sec": round(wait_sec, 1),
+        }
+    elif run_entry_enabled:
         entry_result = run_entry_flow(
             DB_PATH,
             alpaca,
@@ -372,6 +439,7 @@ def run_once() -> dict[str, Any]:
             log_step_fn=log_step,
             allow_order_submission=allow_order_submission,
         )
+        _set_runtime_state_value(DB_PATH, "last_buy_check_at", str(now_epoch))
     else:
         log_step("EntryFlow: DEBUG_EXECUTION_MODE によりスキップ")
         entry_result = {"note": "skipped_by_debug_mode", "bought": 0, "rejected_count": 0}
@@ -439,6 +507,8 @@ def run_once() -> dict[str, Any]:
             "force_run_when_market_closed": DEBUG_FORCE_RUN_WHEN_MARKET_CLOSED,
             "allow_order_submission": allow_order_submission,
             "timezone_mode": get_timezone_mode_normalized(),
+            "buy_check_interval_seconds": BUY_CHECK_INTERVAL_SECONDS,
+            "last_buy_check_at": last_buy_check_at_epoch,
         },
         "account_before": account_before,
         "account_after": account_after,

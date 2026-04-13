@@ -30,6 +30,8 @@ ALPACA_DATA_FEED: Final[str] = "iex"  # データフィード（iex/sip 等）
 HTTP_TIMEOUT_SECONDS: Final[int] = 15  # HTTPタイムアウト秒
 ORDER_STATUS_MAX_WAIT_SECONDS: Final[int] = 8  # 発注直後の状態確定待機秒数
 ORDER_STATUS_POLL_INTERVAL_SECONDS: Final[float] = 1.0  # 注文状態ポーリング間隔秒
+BUY_CHECK_INTERVAL_SECONDS: Final[int] = 180  # 買い判定の実行間隔（秒）
+SELL_CHECK_INTERVAL_SECONDS: Final[int] = 60  # 売り判定の実行間隔（秒）
 
 # ------------------------------------------------------------
 # Timezone display / aggregation settings
