@@ -526,7 +526,7 @@ HTML_PAGE = """<!doctype html>
     .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
     .topbar h2 { margin: 0; }
     .top-right { display:flex; gap:10px; flex-wrap:wrap; align-items:stretch; }
-    .top-market, .top-conn { border:1px solid #5fae5f; border-radius:8px; padding:6px 8px; background:#121812; min-width: 280px; }
+    .top-market, .top-run, .top-conn { border:1px solid #5fae5f; border-radius:8px; padding:6px 8px; background:#121812; min-width: 240px; }
     .top-conn-title { font-size:11px; margin-bottom:4px; color:#dfffdc; }
     .market-open { color:#bfffbf; }
     .market-closed { color:#ffcb8b; }
@@ -539,12 +539,16 @@ HTML_PAGE = """<!doctype html>
     <h2>Trading Bot Monitor</h2>
     <div class="top-right">
       <div class="top-market">
-        <div class="top-conn-title">Market / Run Status (JST)</div>
+        <div class="top-conn-title">Market Status (JST)</div>
         <div class="status-row"><span>Market: <span id="market-state" class="mono market-closed">CLOSED</span></span></div>
         <div class="status-row"><span id="market-countdown" class="mono">開場まで --:--:--.---</span></div>
         <div class="status-row"><span id="market-target" class="mono small">target: -</span></div>
+      </div>
+      <div class="top-run">
+        <div class="top-conn-title">Run Status</div>
         <div class="status-row"><span>Run: <span id="run-state" class="mono run-waiting">WAITING</span></span></div>
         <div class="status-row"><span id="run-countdown" class="mono">次回まで --:--:--.---</span></div>
+        <div class="status-row"><span id="run-interval" class="mono small">interval: 60s</span></div>
       </div>
       <div class="top-conn">
         <div class="top-conn-title">接続状態（最終実行）</div>
@@ -732,10 +736,11 @@ function renderSystem(system) {
 }
 function setStatusText(el, value) {
   if (!el) return;
-  const v = String(value || "UNKNOWN").toUpperCase();
-  el.textContent = v;
+  const raw = String(value || "UNKNOWN").toUpperCase();
+  const label = raw === "OK" ? "OK✅" : (raw === "NG" ? "NG✖" : "UNKNOWN");
+  el.textContent = label;
   el.classList.remove("status-ok", "status-ng", "status-unknown");
-  el.classList.add(statusClass(v));
+  el.classList.add(statusClass(raw));
 }
 function renderConnectivity(conn) {
   const c = conn || {};
@@ -774,11 +779,16 @@ function tickMarketRun() {
 
   const runStateEl = document.getElementById("run-state");
   const runCountdownEl = document.getElementById("run-countdown");
+  const runIntervalEl = document.getElementById("run-interval");
   if (runStateEl && runCountdownEl) {
     const state = String(run?.state || "UNKNOWN").toUpperCase();
     runStateEl.textContent = state;
     runStateEl.classList.remove("run-running", "run-waiting");
     runStateEl.classList.add(state === "RUNNING" ? "run-running" : "run-waiting");
+    const intervalSec = Number(run?.interval_sec || 60);
+    if (runIntervalEl) {
+      runIntervalEl.textContent = `interval: ${Number.isFinite(intervalSec) ? intervalSec : 60}s`;
+    }
     const target = parseMs(run?.target_at);
     if (target === null) {
       runCountdownEl.textContent = "実行情報: --:--:--.---";
