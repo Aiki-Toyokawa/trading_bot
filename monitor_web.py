@@ -671,17 +671,6 @@ HTML_PAGE = """<!doctype html>
         <tbody id="system-body"></tbody>
       </table>
     </div>
-    <div class="card" style="flex:1; min-width:360px;">
-      <h3>Open Positions（購入価格 / 現在価格）</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>symbol</th><th>qty</th><th>entry</th><th>current</th><th>uPnL</th><th>uPnL(%)</th><th>snapshot(JST)</th>
-          </tr>
-        </thead>
-        <tbody id="positions-body"></tbody>
-      </table>
-    </div>
   </div>
   <div class="card" style="margin-top:10px;">
     <h3>直近Run</h3>
@@ -704,6 +693,17 @@ HTML_PAGE = """<!doctype html>
         </tr>
       </thead>
       <tbody id="logs-body"></tbody>
+    </table>
+  </div>
+  <div class="card" style="margin-top:10px;">
+    <h3>Open Positions（購入価格 / 現在価格）</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>symbol</th><th>qty</th><th>entry</th><th>current</th><th>uPnL</th><th>uPnL(%)</th><th>snapshot(JST)</th>
+        </tr>
+      </thead>
+      <tbody id="positions-body"></tbody>
     </table>
   </div>
 <script>
