@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 
 # Env / local
+venv/
 .venv/
 .env
 
@@ -14,3 +15,6 @@ db/*.db-shm
 # OS
 .DS_Store
 Thumbs.db
+
+# Log
+monitor.log
