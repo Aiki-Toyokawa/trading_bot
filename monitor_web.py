@@ -582,7 +582,7 @@ def build_summary(db_path: Path) -> dict[str, Any]:
         db_path=db_path,
         interval_sec=SELL_CHECK_INTERVAL_SECONDS,
         running_started=running_started,
-        runtime_state_key=None,
+        runtime_state_key="last_sell_check_at",
     )
     return {
         "generated_at": _utc_now_iso(),

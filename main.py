@@ -15,6 +15,7 @@ from app_settings import (
     DEBUG_FORCE_RUN_WHEN_MARKET_CLOSED,
     ENABLE_DB_RETENTION_CLEANUP,
     MARKET_HOURS_GUARD_ENABLED,
+    SELL_CHECK_INTERVAL_SECONDS,
     POSITION_SNAPSHOT_RETENTION_DAYS,
     SIGNAL_RETENTION_DAYS,
     get_timezone_mode_normalized,
@@ -399,6 +400,7 @@ def run_once() -> dict[str, Any]:
     sync_result = run_sync_flow(DB_PATH, alpaca, log_step_fn=log_step)
 
     log_section("Exit Flow")
+    exit_check_at_epoch = time.time()
     if run_exit_enabled:
         exit_result = run_exit_flow(
             DB_PATH,
@@ -406,6 +408,7 @@ def run_once() -> dict[str, Any]:
             log_step_fn=log_step,
             allow_order_submission=allow_order_submission,
         )
+        _set_runtime_state_value(DB_PATH, "last_sell_check_at", str(exit_check_at_epoch))
     else:
         log_step("ExitFlow: DEBUG_EXECUTION_MODE によりスキップ")
         exit_result = {"note": "skipped_by_debug_mode", "checked": 0, "sold": 0}
@@ -415,20 +418,29 @@ def run_once() -> dict[str, Any]:
     now_epoch = time.time()
     last_buy_check_at_raw = _get_runtime_state_value(DB_PATH, "last_buy_check_at")
     last_buy_check_at_epoch = _to_float(last_buy_check_at_raw, 0.0)
+    last_sell_check_at_raw = _get_runtime_state_value(DB_PATH, "last_sell_check_at")
+    last_sell_check_at_epoch = _to_float(last_sell_check_at_raw, 0.0)
     next_buy_due_epoch = last_buy_check_at_epoch + float(BUY_CHECK_INTERVAL_SECONDS)
-    buy_interval_ready = (last_buy_check_at_epoch <= 0.0) or (now_epoch >= next_buy_due_epoch)
+    # systemdタイマーの揺らぎ吸収: 5%（最大10秒）の許容幅を持たせる
+    buy_interval_slack_sec = min(10.0, max(1.0, float(BUY_CHECK_INTERVAL_SECONDS) * 0.05))
+    buy_interval_ready = (
+        (last_buy_check_at_epoch <= 0.0)
+        or ((now_epoch + buy_interval_slack_sec) >= next_buy_due_epoch)
+    )
 
     if run_entry_enabled and not buy_interval_ready:
         wait_sec = max(next_buy_due_epoch - now_epoch, 0.0)
+        elapsed_sec = max(now_epoch - last_buy_check_at_epoch, 0.0) if last_buy_check_at_epoch > 0 else 0.0
         log_step(
             "EntryFlow: BUY間隔ゲートによりスキップ "
-            f"(interval={BUY_CHECK_INTERVAL_SECONDS}s next_in={round(wait_sec, 1)}s)"
+            f"(interval={BUY_CHECK_INTERVAL_SECONDS}s elapsed={round(elapsed_sec, 1)}s next_in={round(wait_sec, 1)}s)"
         )
         entry_result = {
             "note": "skipped_by_buy_interval",
             "bought": 0,
             "rejected_count": 0,
             "next_buy_in_sec": round(wait_sec, 1),
+            "elapsed_since_last_buy_check_sec": round(elapsed_sec, 1),
         }
     elif run_entry_enabled:
         entry_result = run_entry_flow(
@@ -508,7 +520,9 @@ def run_once() -> dict[str, Any]:
             "allow_order_submission": allow_order_submission,
             "timezone_mode": get_timezone_mode_normalized(),
             "buy_check_interval_seconds": BUY_CHECK_INTERVAL_SECONDS,
+            "sell_check_interval_seconds": SELL_CHECK_INTERVAL_SECONDS,
             "last_buy_check_at": last_buy_check_at_epoch,
+            "last_sell_check_at": last_sell_check_at_epoch,
         },
         "account_before": account_before,
         "account_after": account_after,
