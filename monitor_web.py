@@ -516,6 +516,7 @@ HTML_PAGE = """<!doctype html>
     .chart-box { flex:1; min-width:280px; }
     .chart-title { margin:0 0 6px 0; font-size:12px; color:#dfffdc; }
     .status-row { display:flex; align-items:center; margin:1px 0; font-size:11px; line-height:1.2; }
+    .conn-label { display:inline-block; width:96px; }
     .status-dot { width:10px; height:10px; margin-right:6px; border-radius:2px; display:inline-block; }
     .dot-yellow { background:#ffe066; }
     .dot-orange { background:#ff9f43; }
@@ -552,9 +553,9 @@ HTML_PAGE = """<!doctype html>
       </div>
       <div class="top-conn">
         <div class="top-conn-title">接続状態（最終実行）</div>
-        <div class="status-row"><span class="status-dot dot-yellow"></span><span>Alpaca APIs   : <span id="conn-alpaca" class="mono status-unknown">UNKNOWN</span></span></div>
-        <div class="status-row"><span class="status-dot dot-orange"></span><span>Anthropic API : <span id="conn-anthropic" class="mono status-unknown">UNKNOWN</span></span></div>
-        <div class="status-row"><span class="status-dot dot-purple"></span><span>Finviz Web    : <span id="conn-finviz" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-yellow"></span><span><span class="conn-label">Alpaca APIs</span>: <span id="conn-alpaca" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-orange"></span><span><span class="conn-label">Anthropic API</span>: <span id="conn-anthropic" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-purple"></span><span><span class="conn-label">Finviz Web</span>: <span id="conn-finviz" class="mono status-unknown">UNKNOWN</span></span></div>
       </div>
     </div>
   </div>
