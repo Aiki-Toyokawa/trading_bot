@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Env / local
+.venv/
+.env
+
+# DB runtime
+db/trading.db
+db/*.db-wal
+db/*.db-shm
+
+# OS
+.DS_Store
+Thumbs.db
