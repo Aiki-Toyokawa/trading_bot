@@ -21,6 +21,7 @@ from app_settings import (
     MARKET_HOURS_FALLBACK_SESSION_WEEKDAYS,
     MARKET_HOURS_FALLBACK_START,
     MARKET_HOURS_FALLBACK_TZ,
+    RECOMMENDED_POLLING_SECONDS,
 )
 from db_settings import DB_PATH
 from main import initialize_database
@@ -305,6 +306,71 @@ def _fetch_position_pie(db_path: Path) -> list[dict[str, Any]]:
     return result
 
 
+def _fetch_open_position_rows(db_path: Path) -> list[dict[str, Any]]:
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT symbol, MAX(id) AS max_id
+                FROM position_snapshots
+                GROUP BY symbol
+            ),
+            latest_snap AS (
+                SELECT
+                    ps.symbol,
+                    ps.market_price,
+                    ps.market_value,
+                    ps.unrealized_pl,
+                    ps.captured_at
+                FROM latest
+                JOIN position_snapshots ps ON ps.id = latest.max_id
+            )
+            SELECT
+                t.symbol,
+                t.qty,
+                t.entry_price,
+                COALESCE(latest_snap.market_price, t.entry_price, 0.0) AS current_price,
+                COALESCE(latest_snap.market_value, t.qty * COALESCE(latest_snap.market_price, t.entry_price, 0.0), 0.0) AS market_value,
+                COALESCE(
+                    latest_snap.unrealized_pl,
+                    (COALESCE(latest_snap.market_price, t.entry_price, 0.0) - t.entry_price) * t.qty,
+                    0.0
+                ) AS unrealized_pl,
+                COALESCE(latest_snap.captured_at, '') AS snapshot_at
+            FROM trades t
+            LEFT JOIN latest_snap ON latest_snap.symbol = t.symbol
+            WHERE t.status = 'OPEN'
+            ORDER BY t.symbol ASC
+            """
+        ).fetchall()
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row[0] or "")
+        qty = _to_float(row[1], 0.0)
+        entry_price = _to_float(row[2], 0.0)
+        current_price = _to_float(row[3], 0.0)
+        market_value = _to_float(row[4], 0.0)
+        unrealized_pl = _to_float(row[5], 0.0)
+        snapshot_at = str(row[6] or "")
+        unrealized_pct = 0.0
+        if entry_price > 0 and current_price > 0:
+            unrealized_pct = ((current_price - entry_price) / entry_price) * 100.0
+        result.append(
+            {
+                "symbol": symbol,
+                "qty": round(qty, 6),
+                "entry_price": round(entry_price, 4),
+                "current_price": round(current_price, 4),
+                "market_value": round(market_value, 4),
+                "unrealized_pl": round(unrealized_pl, 4),
+                "unrealized_pct": round(unrealized_pct, 4),
+                "snapshot_at": snapshot_at,
+            }
+        )
+    return result
+
+
 def _fetch_latest_connectivity(db_path: Path) -> dict[str, Any]:
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
@@ -409,7 +475,7 @@ def _build_market_timing_jst() -> dict[str, Any]:
     }
 
 
-def _build_run_timing(db_path: Path, default_interval_sec: int = 60) -> dict[str, Any]:
+def _build_run_timing(db_path: Path, default_interval_sec: int = 180) -> dict[str, Any]:
     interval_sec = max(int(default_interval_sec), 1)
     now_utc = datetime.now(timezone.utc)
     latest_runs = fetch_recent_runs(db_path, limit=1)
@@ -468,17 +534,25 @@ def build_summary(db_path: Path) -> dict[str, Any]:
     system = _get_system_metrics_cached(ttl_sec=5.0)
     last_connectivity = _fetch_latest_connectivity(db_path)
     market_timing = _build_market_timing_jst()
-    run_timing = _build_run_timing(db_path, default_interval_sec=60)
+    run_timing = _build_run_timing(db_path, default_interval_sec=RECOMMENDED_POLLING_SECONDS)
     return {
         "generated_at": _utc_now_iso(),
         "db_path": str(db_path),
         "stats": stats,
         "run_summary": run_summary,
         "open_overview": open_overview,
+        "open_positions": _fetch_open_position_rows(db_path),
         "system": system,
         "last_connectivity": last_connectivity,
         "market_timing": market_timing,
         "run_timing": run_timing,
+    }
+
+
+def build_system_only() -> dict[str, Any]:
+    return {
+        "generated_at": _utc_now_iso(),
+        "system": _get_system_metrics_cached(ttl_sec=2.0),
     }
 
 
@@ -549,7 +623,7 @@ HTML_PAGE = """<!doctype html>
         <div class="top-conn-title">Run Status</div>
         <div class="status-row"><span>Run: <span id="run-state" class="mono run-waiting">WAITING</span></span></div>
         <div class="status-row"><span id="run-countdown" class="mono">次回まで --:--:--.---</span></div>
-        <div class="status-row"><span id="run-interval" class="mono small">interval: 60s</span></div>
+        <div class="status-row"><span id="run-interval" class="mono small">interval: 180s</span></div>
       </div>
       <div class="top-conn">
         <div class="top-conn-title">接続状態（最終実行）</div>
@@ -559,7 +633,7 @@ HTML_PAGE = """<!doctype html>
       </div>
     </div>
   </div>
-  <div class="small">自動更新: 5秒</div>
+  <div class="small">自動更新: 全体5秒 / System 2秒（ms表示）</div>
   <div class="row" id="kpi-row"></div>
   <div class="row" style="margin-top:10px;">
     <div class="card" style="flex:1; min-width:360px;">
@@ -595,6 +669,17 @@ HTML_PAGE = """<!doctype html>
           <tr><th>項目</th><th>値</th></tr>
         </thead>
         <tbody id="system-body"></tbody>
+      </table>
+    </div>
+    <div class="card" style="flex:1; min-width:360px;">
+      <h3>Open Positions（購入価格 / 現在価格）</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>symbol</th><th>qty</th><th>entry</th><th>current</th><th>uPnL</th><th>uPnL(%)</th><th>snapshot(JST)</th>
+          </tr>
+        </thead>
+        <tbody id="positions-body"></tbody>
       </table>
     </div>
   </div>
@@ -692,6 +777,39 @@ function fmtUtcDateTime(iso) {
   });
   return fmt.format(d).replaceAll("/", "-") + " UTC";
 }
+function fmtUtcDateTimeMs(ms) {
+  const d = new Date(ms);
+  const fmt = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return fmt.format(d).replaceAll("/", "-") + " UTC";
+}
+function fmtJtcDateTimeMs(ms) {
+  const d = new Date(ms);
+  const fmt = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return fmt.format(d).replaceAll("/", "-") + " JTC";
+}
+function fmtDurationSecMs(seconds) {
+  const s = Number(seconds || 0);
+  const ms = Math.max(0, Math.floor(s * 1000));
+  return fmtMs(ms);
+}
 function statusClass(v) {
   const t = String(v || "UNKNOWN").toUpperCase();
   if (t === "OK") return "status-ok";
@@ -701,6 +819,7 @@ function statusClass(v) {
 const liveState = {
   market: null,
   run: null,
+  system: null,
 };
 function renderKpi(summary) {
   const total = summary?.stats?.total ?? {};
@@ -742,10 +861,20 @@ function renderStats(stats) {
   }).join("");
 }
 function renderSystem(system) {
+  const nowIso = String(system?.now_utc || "");
+  const nowMs = parseMs(nowIso);
+  const receivedAtMs = Date.now();
+  liveState.system = {
+    baseNowMs: nowMs,
+    baseSystemUptimeSec: Number(system?.system_uptime_sec || 0),
+    baseMonitorUptimeSec: Number(system?.monitor_uptime_sec || 0),
+    receivedAtMs,
+  };
+
   const body = document.getElementById("system-body");
   const rows = [
-    ["現在時刻(UTC)", fmtUtcDateTime(system?.now_utc)],
-    ["現在時刻(JTC)", fmtJstDateTime(system?.now_utc)],
+    ["現在時刻(UTC)", `<span id="sys-now-utc" class="mono">${esc(fmtUtcDateTime(nowIso))}</span>`],
+    ["現在時刻(JTC)", `<span id="sys-now-jtc" class="mono">${esc(fmtJstDateTime(nowIso).replace("JST", "JTC"))}</span>`],
     ["プラットフォーム", system?.platform],
     ["CPUコア数", system?.cpu_count],
     ["CPU使用率(%)", system?.cpu_percent],
@@ -755,8 +884,8 @@ function renderSystem(system) {
     ["ディスク使用率(%)", system?.disk_percent],
     ["ディスク使用(GB)", system?.disk_used_gb],
     ["ディスク合計(GB)", system?.disk_total_gb],
-    ["OS稼働時間(秒)", system?.system_uptime_sec],
-    ["監視Web稼働時間(秒)", system?.monitor_uptime_sec],
+    ["OS稼働時間(ms)", `<span id="sys-uptime-os" class="mono">${esc(fmtDurationSecMs(system?.system_uptime_sec))}</span>`],
+    ["監視Web稼働時間(ms)", `<span id="sys-uptime-monitor" class="mono">${esc(fmtDurationSecMs(system?.monitor_uptime_sec))}</span>`],
     ["CPU温度(℃)", system?.temperature_c],
     ["CPUクロック(Hz)", system?.cpu_clock_hz],
     ["スロットリング状態(hex)", system?.throttled_hex],
@@ -765,7 +894,45 @@ function renderSystem(system) {
   body.innerHTML = rows.map(([k, v]) => `
     <tr>
       <td>${esc(k)}</td>
-      <td class="mono">${esc(v ?? "")}</td>
+      <td class="mono">${typeof v === "string" ? v : esc(v ?? "")}</td>
+    </tr>`).join("");
+  tickSystemLive();
+}
+function tickSystemLive() {
+  const s = liveState.system;
+  if (!s || s.baseNowMs === null) return;
+  const nowClientMs = Date.now();
+  const elapsedMs = Math.max(0, nowClientMs - Number(s.receivedAtMs || nowClientMs));
+  const nowUtcMs = Number(s.baseNowMs) + elapsedMs;
+  const osUptimeMs = (Number(s.baseSystemUptimeSec || 0) * 1000) + elapsedMs;
+  const monitorUptimeMs = (Number(s.baseMonitorUptimeSec || 0) * 1000) + elapsedMs;
+
+  const nowUtcEl = document.getElementById("sys-now-utc");
+  const nowJtcEl = document.getElementById("sys-now-jtc");
+  const osUptimeEl = document.getElementById("sys-uptime-os");
+  const monUptimeEl = document.getElementById("sys-uptime-monitor");
+  if (nowUtcEl) nowUtcEl.textContent = fmtUtcDateTimeMs(nowUtcMs);
+  if (nowJtcEl) nowJtcEl.textContent = fmtJtcDateTimeMs(nowUtcMs);
+  if (osUptimeEl) osUptimeEl.textContent = fmtMs(osUptimeMs);
+  if (monUptimeEl) monUptimeEl.textContent = fmtMs(monitorUptimeMs);
+}
+function renderOpenPositions(rows) {
+  const body = document.getElementById("positions-body");
+  const items = Array.isArray(rows) ? rows : [];
+  if (!body) return;
+  if (!items.length) {
+    body.innerHTML = `<tr><td colspan="7">OPEN position はありません</td></tr>`;
+    return;
+  }
+  body.innerHTML = items.map(p => `
+    <tr>
+      <td>${esc(p.symbol)}</td>
+      <td>${esc(p.qty)}</td>
+      <td>${num(p.entry_price, 4)}</td>
+      <td>${num(p.current_price, 4)}</td>
+      <td>${num(p.unrealized_pl, 4)}</td>
+      <td>${num(p.unrealized_pct, 4)}</td>
+      <td class="mono">${esc(fmtJstDateTime(p.snapshot_at))}</td>
     </tr>`).join("");
 }
 function setStatusText(el, value) {
@@ -819,9 +986,9 @@ function tickMarketRun() {
     runStateEl.textContent = state;
     runStateEl.classList.remove("run-running", "run-waiting");
     runStateEl.classList.add(state === "RUNNING" ? "run-running" : "run-waiting");
-    const intervalSec = Number(run?.interval_sec || 60);
+    const intervalSec = Number(run?.interval_sec || 180);
     if (runIntervalEl) {
-      runIntervalEl.textContent = `interval: ${Number.isFinite(intervalSec) ? intervalSec : 60}s`;
+      runIntervalEl.textContent = `interval: ${Number.isFinite(intervalSec) ? intervalSec : 180}s`;
     }
     const target = parseMs(run?.target_at);
     if (target === null) {
@@ -994,6 +1161,7 @@ async function refresh() {
     renderMarketRun(summary);
     renderStats(summary.stats);
     renderSystem(summary.system);
+    renderOpenPositions(summary.open_positions);
     drawPie("position-pie", "position-legend", charts.position_pie || []);
     drawLineChart("trades-line", charts.trades_wins_series || []);
     renderRuns(runs.runs);
@@ -1002,8 +1170,18 @@ async function refresh() {
     console.error(e);
   }
 }
+async function refreshSystemOnly() {
+  try {
+    const payload = await getJson("/api/system");
+    renderSystem(payload?.system ?? {});
+  } catch (e) {
+    console.error(e);
+  }
+}
 refresh();
 setInterval(tickMarketRun, 100);
+setInterval(tickSystemLive, 100);
+setInterval(refreshSystemOnly, 2000);
 setInterval(refresh, 5000);
 </script>
 </body>
@@ -1042,6 +1220,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/summary":
                 self._send_json(build_summary(self.db_path))
+                return
+            if path == "/api/system":
+                self._send_json(build_system_only())
                 return
             if path == "/api/runs":
                 limit = _parse_limit(parsed.query, default=50, max_value=300)
