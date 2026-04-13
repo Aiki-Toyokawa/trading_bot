@@ -552,9 +552,9 @@ HTML_PAGE = """<!doctype html>
       </div>
       <div class="top-conn">
         <div class="top-conn-title">接続状態（最終実行）</div>
-        <div class="status-row"><span class="status-dot dot-yellow"></span><span>Alpaca APIs: <span id="conn-alpaca" class="mono status-unknown">UNKNOWN</span></span></div>
-        <div class="status-row"><span class="status-dot dot-orange"></span><span>Anthropic API: <span id="conn-anthropic" class="mono status-unknown">UNKNOWN</span></span></div>
-        <div class="status-row"><span class="status-dot dot-purple"></span><span>Finviz Web: <span id="conn-finviz" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-yellow"></span><span>Alpaca APIs   : <span id="conn-alpaca" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-orange"></span><span>Anthropic API : <span id="conn-anthropic" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-purple"></span><span>Finviz Web    : <span id="conn-finviz" class="mono status-unknown">UNKNOWN</span></span></div>
       </div>
     </div>
   </div>
