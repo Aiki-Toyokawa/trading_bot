@@ -17,11 +17,12 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from app_settings import (
+    BUY_CHECK_INTERVAL_SECONDS,
     MARKET_HOURS_FALLBACK_END,
     MARKET_HOURS_FALLBACK_SESSION_WEEKDAYS,
     MARKET_HOURS_FALLBACK_START,
     MARKET_HOURS_FALLBACK_TZ,
-    RECOMMENDED_POLLING_SECONDS,
+    SELL_CHECK_INTERVAL_SECONDS,
 )
 from db_settings import DB_PATH
 from main import initialize_database
@@ -475,13 +476,7 @@ def _build_market_timing_jst() -> dict[str, Any]:
     }
 
 
-def _build_run_timing(db_path: Path, default_interval_sec: int = 180) -> dict[str, Any]:
-    interval_sec = max(int(default_interval_sec), 1)
-    now_utc = datetime.now(timezone.utc)
-    latest_runs = fetch_recent_runs(db_path, limit=1)
-    latest = latest_runs[0] if latest_runs else {}
-
-    # 稼働中判定: main.py 実行中プロセスの有無を優先
+def _get_running_main_started_utc() -> datetime | None:
     running_started: datetime | None = None
     if psutil is not None:
         try:
@@ -496,6 +491,36 @@ def _build_run_timing(db_path: Path, default_interval_sec: int = 180) -> dict[st
                             running_started = dt
         except Exception:
             running_started = None
+    return running_started
+
+
+def _fetch_runtime_state_float(db_path: Path, state_key: str) -> float | None:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT state_value
+            FROM runtime_state
+            WHERE state_key = ?
+            LIMIT 1
+            """,
+            (state_key,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_task_timing(
+    db_path: Path,
+    interval_sec: int,
+    running_started: datetime | None = None,
+    runtime_state_key: str | None = None,
+) -> dict[str, Any]:
+    interval_sec = max(int(interval_sec), 1)
+    now_utc = datetime.now(timezone.utc)
 
     if running_started is not None:
         return {
@@ -505,7 +530,17 @@ def _build_run_timing(db_path: Path, default_interval_sec: int = 180) -> dict[st
             "interval_sec": interval_sec,
         }
 
-    started_dt = _parse_iso_utc(latest.get("started_at")) if latest else None
+    started_dt: datetime | None = None
+    if runtime_state_key:
+        epoch = _fetch_runtime_state_float(db_path, runtime_state_key)
+        if epoch is not None and epoch > 0:
+            started_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+    if started_dt is None:
+        latest_runs = fetch_recent_runs(db_path, limit=1)
+        latest = latest_runs[0] if latest_runs else {}
+        started_dt = _parse_iso_utc(latest.get("started_at")) if latest else None
+
     if started_dt is None:
         started_dt = now_utc
     next_dt = started_dt + timedelta(seconds=interval_sec)
@@ -534,7 +569,19 @@ def build_summary(db_path: Path) -> dict[str, Any]:
     system = _get_system_metrics_cached(ttl_sec=5.0)
     last_connectivity = _fetch_latest_connectivity(db_path)
     market_timing = _build_market_timing_jst()
-    run_timing = _build_run_timing(db_path, default_interval_sec=RECOMMENDED_POLLING_SECONDS)
+    running_started = _get_running_main_started_utc()
+    buy_timing = _build_task_timing(
+        db_path=db_path,
+        interval_sec=BUY_CHECK_INTERVAL_SECONDS,
+        running_started=running_started,
+        runtime_state_key="last_buy_check_at",
+    )
+    sell_timing = _build_task_timing(
+        db_path=db_path,
+        interval_sec=SELL_CHECK_INTERVAL_SECONDS,
+        running_started=running_started,
+        runtime_state_key=None,
+    )
     return {
         "generated_at": _utc_now_iso(),
         "db_path": str(db_path),
@@ -545,7 +592,9 @@ def build_summary(db_path: Path) -> dict[str, Any]:
         "system": system,
         "last_connectivity": last_connectivity,
         "market_timing": market_timing,
-        "run_timing": run_timing,
+        "buy_timing": buy_timing,
+        "sell_timing": sell_timing,
+        "run_timing": buy_timing,
     }
 
 
@@ -601,7 +650,7 @@ HTML_PAGE = """<!doctype html>
     .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
     .topbar h2 { margin: 0; }
     .top-right { display:flex; gap:10px; flex-wrap:wrap; align-items:stretch; }
-    .top-market, .top-run, .top-conn { border:1px solid #5fae5f; border-radius:8px; padding:6px 8px; background:#121812; min-width: 240px; }
+    .top-market, .top-buy, .top-sell, .top-conn { border:1px solid #5fae5f; border-radius:8px; padding:6px 8px; background:#121812; min-width: 240px; }
     .top-conn-title { font-size:11px; margin-bottom:4px; color:#dfffdc; }
     .market-open { color:#bfffbf; }
     .market-closed { color:#ffcb8b; }
@@ -619,11 +668,17 @@ HTML_PAGE = """<!doctype html>
         <div class="status-row"><span id="market-countdown" class="mono">開場まで --:--:--.---</span></div>
         <div class="status-row"><span id="market-target" class="mono small">target: -</span></div>
       </div>
-      <div class="top-run">
-        <div class="top-conn-title">Run Status</div>
-        <div class="status-row"><span>Run: <span id="run-state" class="mono run-waiting">WAITING</span></span></div>
-        <div class="status-row"><span id="run-countdown" class="mono">次回まで --:--:--.---</span></div>
-        <div class="status-row"><span id="run-interval" class="mono small">interval: 180s</span></div>
+      <div class="top-buy">
+        <div class="top-conn-title">Buy Status</div>
+        <div class="status-row"><span>Buy: <span id="buy-state" class="mono run-waiting">WAITING</span></span></div>
+        <div class="status-row"><span id="buy-countdown" class="mono">次回まで --:--:--.---</span></div>
+        <div class="status-row"><span id="buy-interval" class="mono small">interval: 180s</span></div>
+      </div>
+      <div class="top-sell">
+        <div class="top-conn-title">Sell Status</div>
+        <div class="status-row"><span>Sell: <span id="sell-state" class="mono run-waiting">WAITING</span></span></div>
+        <div class="status-row"><span id="sell-countdown" class="mono">次回まで --:--:--.---</span></div>
+        <div class="status-row"><span id="sell-interval" class="mono small">interval: 60s</span></div>
       </div>
       <div class="top-conn">
         <div class="top-conn-title">接続状態（最終実行）</div>
@@ -818,7 +873,8 @@ function statusClass(v) {
 }
 const liveState = {
   market: null,
-  run: null,
+  buy: null,
+  sell: null,
   system: null,
 };
 function renderKpi(summary) {
@@ -951,13 +1007,15 @@ function renderConnectivity(conn) {
 }
 function renderMarketRun(summary) {
   liveState.market = summary?.market_timing ?? null;
-  liveState.run = summary?.run_timing ?? null;
+  liveState.buy = summary?.buy_timing ?? summary?.run_timing ?? null;
+  liveState.sell = summary?.sell_timing ?? null;
   tickMarketRun();
 }
 function tickMarketRun() {
   const now = Date.now();
   const market = liveState.market || {};
-  const run = liveState.run || {};
+  const buy = liveState.buy || {};
+  const sell = liveState.sell || {};
 
   const marketStateEl = document.getElementById("market-state");
   const marketCountdownEl = document.getElementById("market-countdown");
@@ -978,29 +1036,36 @@ function tickMarketRun() {
     }
   }
 
-  const runStateEl = document.getElementById("run-state");
-  const runCountdownEl = document.getElementById("run-countdown");
-  const runIntervalEl = document.getElementById("run-interval");
-  if (runStateEl && runCountdownEl) {
-    const state = String(run?.state || "UNKNOWN").toUpperCase();
-    runStateEl.textContent = state;
-    runStateEl.classList.remove("run-running", "run-waiting");
-    runStateEl.classList.add(state === "RUNNING" ? "run-running" : "run-waiting");
-    const intervalSec = Number(run?.interval_sec || 180);
-    if (runIntervalEl) {
-      runIntervalEl.textContent = `interval: ${Number.isFinite(intervalSec) ? intervalSec : 180}s`;
+  function renderTaskStatus(prefix, task, defaultIntervalSec) {
+    const stateEl = document.getElementById(`${prefix}-state`);
+    const countdownEl = document.getElementById(`${prefix}-countdown`);
+    const intervalEl = document.getElementById(`${prefix}-interval`);
+    if (!stateEl || !countdownEl) return;
+
+    const state = String(task?.state || "UNKNOWN").toUpperCase();
+    stateEl.textContent = state;
+    stateEl.classList.remove("run-running", "run-waiting");
+    stateEl.classList.add(state === "RUNNING" ? "run-running" : "run-waiting");
+
+    const intervalSec = Number(task?.interval_sec || defaultIntervalSec);
+    if (intervalEl) {
+      intervalEl.textContent = `interval: ${Number.isFinite(intervalSec) ? intervalSec : defaultIntervalSec}s`;
     }
-    const target = parseMs(run?.target_at);
+
+    const target = parseMs(task?.target_at);
     if (target === null) {
-      runCountdownEl.textContent = "実行情報: --:--:--.---";
+      countdownEl.textContent = "実行情報: --:--:--.---";
     } else if (state === "RUNNING") {
       const elapsed = Math.max(now - target, 0);
-      runCountdownEl.textContent = `実行中 ${fmtMs(elapsed)}`;
+      countdownEl.textContent = `実行中 ${fmtMs(elapsed)}`;
     } else {
       const remain = Math.max(target - now, 0);
-      runCountdownEl.textContent = `次回まで ${fmtMs(remain)}`;
+      countdownEl.textContent = `次回まで ${fmtMs(remain)}`;
     }
   }
+
+  renderTaskStatus("buy", buy, 180);
+  renderTaskStatus("sell", sell, 60);
 }
 function renderRuns(runs) {
   const body = document.getElementById("runs-body");
