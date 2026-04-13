@@ -712,7 +712,7 @@ function renderKpi(summary) {
     ["累計損益額($)", "$" + num(total.pnl_amount ?? 0, 4)],
     ["実行回数", run.total_runs ?? 0],
     ["最終実行", fmtJstDateTime(run.last_finished_at ?? "")],
-    ["保有中ポジション数", open.open_trade_count ?? 0],
+    ["保有ポジション数", open.open_trade_count ?? 0],
   ];
   const row = document.getElementById("kpi-row");
   row.innerHTML = cards.map(([k,v]) => `<div class="card kpi"><h3>${esc(k)}</h3><div class="mono">${esc(v)}</div></div>`).join("");
