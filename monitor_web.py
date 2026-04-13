@@ -8,13 +8,20 @@ import sqlite3
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
+from app_settings import (
+    MARKET_HOURS_FALLBACK_END,
+    MARKET_HOURS_FALLBACK_SESSION_WEEKDAYS,
+    MARKET_HOURS_FALLBACK_START,
+    MARKET_HOURS_FALLBACK_TZ,
+)
 from db_settings import DB_PATH
 from main import initialize_database
 from repository.order_repository import fetch_recent_order_logs, fetch_trade_statistics
@@ -47,6 +54,30 @@ def _to_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_iso_utc(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _to_iso_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    hh, mm = str(value).strip().split(":")
+    return int(hh), int(mm)
 
 
 def _read_raspi_metrics() -> dict[str, Any]:
@@ -324,6 +355,104 @@ def _fetch_latest_connectivity(db_path: Path) -> dict[str, Any]:
     }
 
 
+def _build_market_timing_jst() -> dict[str, Any]:
+    tz = ZoneInfo(MARKET_HOURS_FALLBACK_TZ or "Asia/Tokyo")
+    now = datetime.now(tz)
+    start_h, start_m = _parse_hhmm(MARKET_HOURS_FALLBACK_START)
+    end_h, end_m = _parse_hhmm(MARKET_HOURS_FALLBACK_END)
+    start_tuple = (start_h, start_m, 0, 0)
+    end_tuple = (end_h, end_m, 0, 0)
+    session_weekdays = set(int(v) for v in MARKET_HOURS_FALLBACK_SESSION_WEEKDAYS)
+    now_tuple = (now.hour, now.minute, now.second, now.microsecond)
+    crosses_midnight = (start_h, start_m) > (end_h, end_m)
+
+    if not crosses_midnight:
+        in_time = start_tuple <= now_tuple <= end_tuple
+        session_day = now.weekday()
+    else:
+        in_time = (now_tuple >= start_tuple) or (now_tuple <= end_tuple)
+        session_day = now.weekday() if now_tuple >= start_tuple else (now.weekday() - 1) % 7
+    in_weekday = session_day in session_weekdays
+    is_open = bool(in_time and in_weekday)
+
+    if is_open:
+        if crosses_midnight and now_tuple >= start_tuple:
+            target = (now.replace(hour=end_h, minute=end_m, second=0, microsecond=0) + timedelta(days=1))
+        else:
+            target = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        return {
+            "state": "OPEN",
+            "now_jst": now.isoformat(),
+            "target_jst": target.isoformat(),
+            "target_label": "close",
+        }
+
+    # CLOSED: 次の開場時刻を探索
+    target: datetime | None = None
+    for add_days in range(0, 8):
+        day = now + timedelta(days=add_days)
+        if day.weekday() not in session_weekdays:
+            continue
+        candidate = day.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        if candidate <= now:
+            continue
+        target = candidate
+        break
+    if target is None:
+        target = now + timedelta(days=1)
+
+    return {
+        "state": "CLOSED",
+        "now_jst": now.isoformat(),
+        "target_jst": target.isoformat(),
+        "target_label": "open",
+    }
+
+
+def _build_run_timing(db_path: Path, default_interval_sec: int = 60) -> dict[str, Any]:
+    interval_sec = max(int(default_interval_sec), 1)
+    now_utc = datetime.now(timezone.utc)
+    latest_runs = fetch_recent_runs(db_path, limit=1)
+    latest = latest_runs[0] if latest_runs else {}
+
+    # 稼働中判定: main.py 実行中プロセスの有無を優先
+    running_started: datetime | None = None
+    if psutil is not None:
+        try:
+            for p in psutil.process_iter(attrs=["cmdline", "create_time"]):
+                cmdline = p.info.get("cmdline") or []
+                text = " ".join(str(x) for x in cmdline)
+                if "main.py" in text and "trading_bot" in text:
+                    created = _to_float(p.info.get("create_time"), 0.0)
+                    if created > 0:
+                        dt = datetime.fromtimestamp(created, tz=timezone.utc)
+                        if running_started is None or dt > running_started:
+                            running_started = dt
+        except Exception:
+            running_started = None
+
+    if running_started is not None:
+        return {
+            "state": "RUNNING",
+            "now_utc": _to_iso_z(now_utc),
+            "target_at": _to_iso_z(running_started),
+            "interval_sec": interval_sec,
+        }
+
+    started_dt = _parse_iso_utc(latest.get("started_at")) if latest else None
+    if started_dt is None:
+        started_dt = now_utc
+    next_dt = started_dt + timedelta(seconds=interval_sec)
+    if next_dt < now_utc:
+        next_dt = now_utc
+    return {
+        "state": "WAITING",
+        "now_utc": _to_iso_z(now_utc),
+        "target_at": _to_iso_z(next_dt),
+        "interval_sec": interval_sec,
+    }
+
+
 def build_charts(db_path: Path, limit: int = 240) -> dict[str, Any]:
     return {
         "generated_at": _utc_now_iso(),
@@ -338,6 +467,8 @@ def build_summary(db_path: Path) -> dict[str, Any]:
     open_overview = _fetch_open_trade_overview(db_path)
     system = _get_system_metrics_cached(ttl_sec=5.0)
     last_connectivity = _fetch_latest_connectivity(db_path)
+    market_timing = _build_market_timing_jst()
+    run_timing = _build_run_timing(db_path, default_interval_sec=60)
     return {
         "generated_at": _utc_now_iso(),
         "db_path": str(db_path),
@@ -346,6 +477,8 @@ def build_summary(db_path: Path) -> dict[str, Any]:
         "open_overview": open_overview,
         "system": system,
         "last_connectivity": last_connectivity,
+        "market_timing": market_timing,
+        "run_timing": run_timing,
     }
 
 
@@ -367,7 +500,7 @@ HTML_PAGE = """<!doctype html>
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: stretch; }
     .card { background:#121812; border:1px solid #5fae5f; border-radius:10px; padding:12px; box-shadow: 0 0 10px rgba(70, 180, 70, 0.16); }
     .card h3 { margin:0 0 8px 0; font-size:14px; }
-    .kpi { width: 138px; min-height: 44px; height: auto; flex: 0 0 138px; padding:2px 8px; display:flex; flex-direction:column; justify-content:flex-start; }
+    .kpi { width: 210px; min-height: 44px; height: auto; flex: 0 0 210px; padding:2px 8px; display:flex; flex-direction:column; justify-content:flex-start; }
     .kpi h3 { margin:0 0 1px 0; font-size:12px; line-height:1.15; padding-top:4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .kpi .mono { font-size:13px; line-height:1.15; padding-top:4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     table { width:100%; border-collapse: collapse; font-size: 12px; }
@@ -392,18 +525,33 @@ HTML_PAGE = """<!doctype html>
     .status-unknown { color:#d7d7a9; }
     .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
     .topbar h2 { margin: 0; }
-    .top-conn { border:1px solid #5fae5f; border-radius:8px; padding:6px 8px; background:#121812; min-width: 280px; }
+    .top-right { display:flex; gap:10px; flex-wrap:wrap; align-items:stretch; }
+    .top-market, .top-conn { border:1px solid #5fae5f; border-radius:8px; padding:6px 8px; background:#121812; min-width: 280px; }
     .top-conn-title { font-size:11px; margin-bottom:4px; color:#dfffdc; }
+    .market-open { color:#bfffbf; }
+    .market-closed { color:#ffcb8b; }
+    .run-running { color:#bfffbf; }
+    .run-waiting { color:#cfe3ff; }
   </style>
 </head>
 <body>
   <div class="topbar">
     <h2>Trading Bot Monitor</h2>
-    <div class="top-conn">
-      <div class="top-conn-title">接続状態（最終実行）</div>
-      <div class="status-row"><span class="status-dot dot-yellow"></span><span>Alpaca APIs: <span id="conn-alpaca" class="mono status-unknown">UNKNOWN</span></span></div>
-      <div class="status-row"><span class="status-dot dot-orange"></span><span>Anthropic API: <span id="conn-anthropic" class="mono status-unknown">UNKNOWN</span></span></div>
-      <div class="status-row"><span class="status-dot dot-purple"></span><span>Finviz Web: <span id="conn-finviz" class="mono status-unknown">UNKNOWN</span></span></div>
+    <div class="top-right">
+      <div class="top-market">
+        <div class="top-conn-title">Market / Run Status (JST)</div>
+        <div class="status-row"><span>Market: <span id="market-state" class="mono market-closed">CLOSED</span></span></div>
+        <div class="status-row"><span id="market-countdown" class="mono">開場まで --:--:--.---</span></div>
+        <div class="status-row"><span id="market-target" class="mono small">target: -</span></div>
+        <div class="status-row"><span>Run: <span id="run-state" class="mono run-waiting">WAITING</span></span></div>
+        <div class="status-row"><span id="run-countdown" class="mono">次回まで --:--:--.---</span></div>
+      </div>
+      <div class="top-conn">
+        <div class="top-conn-title">接続状態（最終実行）</div>
+        <div class="status-row"><span class="status-dot dot-yellow"></span><span>Alpaca APIs: <span id="conn-alpaca" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-orange"></span><span>Anthropic API: <span id="conn-anthropic" class="mono status-unknown">UNKNOWN</span></span></div>
+        <div class="status-row"><span class="status-dot dot-purple"></span><span>Finviz Web: <span id="conn-finviz" class="mono status-unknown">UNKNOWN</span></span></div>
+      </div>
     </div>
   </div>
   <div class="small">自動更新: 5秒</div>
@@ -479,12 +627,44 @@ function num(v, d=4) {
   const n = Number(v);
   return Number.isFinite(n) ? n.toFixed(d) : "";
 }
+function parseMs(v) {
+  const t = new Date(v || "").getTime();
+  return Number.isFinite(t) ? t : null;
+}
+function fmtMs(ms) {
+  const n = Math.max(0, Math.floor(Number(ms || 0)));
+  const hh = Math.floor(n / 3600000);
+  const mm = Math.floor((n % 3600000) / 60000);
+  const ss = Math.floor((n % 60000) / 1000);
+  const mmm = n % 1000;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(mmm).padStart(3, "0")}`;
+}
+function fmtJstLabel(iso) {
+  const t = parseMs(iso);
+  if (t === null) return "-";
+  const d = new Date(t);
+  const fmt = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return fmt.format(d).split("/").join("-");
+}
 function statusClass(v) {
   const t = String(v || "UNKNOWN").toUpperCase();
   if (t === "OK") return "status-ok";
   if (t === "NG") return "status-ng";
   return "status-unknown";
 }
+const liveState = {
+  market: null,
+  run: null,
+};
 function renderKpi(summary) {
   const total = summary?.stats?.total ?? {};
   const run = summary?.run_summary ?? {};
@@ -562,6 +742,54 @@ function renderConnectivity(conn) {
   setStatusText(document.getElementById("conn-alpaca"), c.alpaca_api);
   setStatusText(document.getElementById("conn-anthropic"), c.anthropic_api);
   setStatusText(document.getElementById("conn-finviz"), c.finviz_web);
+}
+function renderMarketRun(summary) {
+  liveState.market = summary?.market_timing ?? null;
+  liveState.run = summary?.run_timing ?? null;
+  tickMarketRun();
+}
+function tickMarketRun() {
+  const now = Date.now();
+  const market = liveState.market || {};
+  const run = liveState.run || {};
+
+  const marketStateEl = document.getElementById("market-state");
+  const marketCountdownEl = document.getElementById("market-countdown");
+  const marketTargetEl = document.getElementById("market-target");
+  if (marketStateEl && marketCountdownEl && marketTargetEl) {
+    const state = String(market?.state || "CLOSED").toUpperCase();
+    marketStateEl.textContent = state;
+    marketStateEl.classList.remove("market-open", "market-closed");
+    marketStateEl.classList.add(state === "OPEN" ? "market-open" : "market-closed");
+    const target = parseMs(market?.target_jst);
+    if (target === null) {
+      marketCountdownEl.textContent = state === "OPEN" ? "閉場まで --:--:--.---" : "開場まで --:--:--.---";
+      marketTargetEl.textContent = "target: -";
+    } else {
+      const remain = Math.max(target - now, 0);
+      marketCountdownEl.textContent = state === "OPEN" ? `閉場まで ${fmtMs(remain)}` : `開場まで ${fmtMs(remain)}`;
+      marketTargetEl.textContent = `target(JST): ${fmtJstLabel(market?.target_jst)}`;
+    }
+  }
+
+  const runStateEl = document.getElementById("run-state");
+  const runCountdownEl = document.getElementById("run-countdown");
+  if (runStateEl && runCountdownEl) {
+    const state = String(run?.state || "UNKNOWN").toUpperCase();
+    runStateEl.textContent = state;
+    runStateEl.classList.remove("run-running", "run-waiting");
+    runStateEl.classList.add(state === "RUNNING" ? "run-running" : "run-waiting");
+    const target = parseMs(run?.target_at);
+    if (target === null) {
+      runCountdownEl.textContent = "実行情報: --:--:--.---";
+    } else if (state === "RUNNING") {
+      const elapsed = Math.max(now - target, 0);
+      runCountdownEl.textContent = `実行中 ${fmtMs(elapsed)}`;
+    } else {
+      const remain = Math.max(target - now, 0);
+      runCountdownEl.textContent = `次回まで ${fmtMs(remain)}`;
+    }
+  }
 }
 function renderRuns(runs) {
   const body = document.getElementById("runs-body");
@@ -719,6 +947,7 @@ async function refresh() {
     ]);
     renderKpi(summary);
     renderConnectivity(summary.last_connectivity);
+    renderMarketRun(summary);
     renderStats(summary.stats);
     renderSystem(summary.system);
     drawPie("position-pie", "position-legend", charts.position_pie || []);
@@ -730,6 +959,7 @@ async function refresh() {
   }
 }
 refresh();
+setInterval(tickMarketRun, 100);
 setInterval(refresh, 5000);
 </script>
 </body>
