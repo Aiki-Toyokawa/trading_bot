@@ -544,8 +544,10 @@ def _build_task_timing(
     if started_dt is None:
         started_dt = now_utc
     next_dt = started_dt + timedelta(seconds=interval_sec)
-    if next_dt < now_utc:
-        next_dt = now_utc
+    if next_dt <= now_utc:
+        elapsed_sec = max((now_utc - started_dt).total_seconds(), 0.0)
+        steps = int(elapsed_sec // interval_sec) + 1
+        next_dt = started_dt + timedelta(seconds=steps * interval_sec)
     return {
         "state": "WAITING",
         "now_utc": _to_iso_z(now_utc),
@@ -732,7 +734,7 @@ HTML_PAGE = """<!doctype html>
     <table>
       <thead>
         <tr>
-          <th>ID</th><th>finished_at(JST)</th><th>status</th><th>mode</th><th>dur(s)</th>
+          <th>ID</th><th>finished_at(JST)</th><th>status</th><th>label</th><th>mode</th><th>dur(s)</th>
           <th>bought</th><th>sold</th><th>filled</th><th>note</th>
         </tr>
       </thead>
@@ -1069,11 +1071,20 @@ function tickMarketRun() {
 }
 function renderRuns(runs) {
   const body = document.getElementById("runs-body");
+  function getRunLabel(r) {
+    const bought = Number(r?.bought_count || 0);
+    const sold = Number(r?.sold_count || 0);
+    if (bought > 0 && sold > 0) return "BUY+SELL run";
+    if (bought > 0) return "BUY run";
+    if (sold > 0) return "SELL run";
+    return "NO_FILL";
+  }
   body.innerHTML = (runs || []).map(r => `
     <tr>
       <td>${esc(r.id)}</td>
       <td class="mono">${esc(fmtJstDateTime(r.finished_at))}</td>
       <td>${esc(r.status)}</td>
+      <td>${esc(getRunLabel(r))}</td>
       <td>${esc(r.execution_mode)}</td>
       <td>${num(r.duration_sec, 3)}</td>
       <td>${esc(r.bought_count)}</td>
