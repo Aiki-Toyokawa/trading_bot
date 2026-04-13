@@ -603,7 +603,7 @@ HTML_PAGE = """<!doctype html>
     <table>
       <thead>
         <tr>
-          <th>ID</th><th>finished_at</th><th>status</th><th>mode</th><th>dur(s)</th>
+          <th>ID</th><th>finished_at(JST)</th><th>status</th><th>mode</th><th>dur(s)</th>
           <th>bought</th><th>sold</th><th>filled</th><th>note</th>
         </tr>
       </thead>
@@ -660,6 +660,38 @@ function fmtJstLabel(iso) {
   });
   return fmt.format(d).split("/").join("-");
 }
+function fmtJstDateTime(iso) {
+  const t = parseMs(iso);
+  if (t === null) return "";
+  const d = new Date(t);
+  const fmt = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return fmt.format(d).replaceAll("/", "-") + " JST";
+}
+function fmtUtcDateTime(iso) {
+  const t = parseMs(iso);
+  if (t === null) return "";
+  const d = new Date(t);
+  const fmt = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return fmt.format(d).replaceAll("/", "-") + " UTC";
+}
 function statusClass(v) {
   const t = String(v || "UNKNOWN").toUpperCase();
   if (t === "OK") return "status-ok";
@@ -679,7 +711,7 @@ function renderKpi(summary) {
     ["勝率(%)", num(total.win_rate ?? 0, 2)],
     ["累計損益額($)", "$" + num(total.pnl_amount ?? 0, 4)],
     ["実行回数", run.total_runs ?? 0],
-    ["最終実行", run.last_finished_at ?? ""],
+    ["最終実行", fmtJstDateTime(run.last_finished_at ?? "")],
     ["保有中ポジション数", open.open_trade_count ?? 0],
   ];
   const row = document.getElementById("kpi-row");
@@ -712,7 +744,8 @@ function renderStats(stats) {
 function renderSystem(system) {
   const body = document.getElementById("system-body");
   const rows = [
-    ["現在時刻(UTC)", system?.now_utc],
+    ["現在時刻(UTC)", fmtUtcDateTime(system?.now_utc)],
+    ["現在時刻(JTC)", fmtJstDateTime(system?.now_utc)],
     ["プラットフォーム", system?.platform],
     ["CPUコア数", system?.cpu_count],
     ["CPU使用率(%)", system?.cpu_percent],
@@ -807,7 +840,7 @@ function renderRuns(runs) {
   body.innerHTML = (runs || []).map(r => `
     <tr>
       <td>${esc(r.id)}</td>
-      <td class="mono">${esc(r.finished_at)}</td>
+      <td class="mono">${esc(fmtJstDateTime(r.finished_at))}</td>
       <td>${esc(r.status)}</td>
       <td>${esc(r.execution_mode)}</td>
       <td>${num(r.duration_sec, 3)}</td>
