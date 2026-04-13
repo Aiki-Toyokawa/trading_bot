@@ -13,13 +13,13 @@ from app_settings import (
     REMAINING_HALF_MIN_PROFIT_RATE_STRONG,
     REMAINING_HALF_STRONG_FLOOR_TRIGGER_RATE,
     STOP_LOSS_RATE,
-    TAKE_PROFIT_RATE,
     TRAILING_BOOST_TRIGGER_RATE,
-    TRAILING_RATE,
     TRAILING_RATE_STRONG_TREND,
     TRAILING_RATE_TIGHT,
     TRAILING_RATE_VERY_STRONG_TREND,
     TRAILING_VERY_STRONG_TRIGGER_RATE,
+    get_effective_take_profit_rate,
+    get_effective_trailing_rate,
 )
 from logic.entry_logic import sma
 
@@ -72,8 +72,10 @@ def decide_exit(
     if entry_price <= 0 or current_price <= 0 or current_qty <= 0:
         return ExitDecision("HOLD", "invalid_position_or_price", 0.0, current_price)
 
+    take_profit_rate = get_effective_take_profit_rate()
+    trailing_rate_base = get_effective_trailing_rate()
     stop_price = entry_price * STOP_LOSS_RATE
-    soft_tp_trigger = entry_price * TAKE_PROFIT_RATE
+    soft_tp_trigger = entry_price * take_profit_rate
 
     if current_price <= stop_price:
         return ExitDecision("SELL", "stop_loss", current_qty, current_price)
@@ -105,12 +107,12 @@ def decide_exit(
             observed_high,
         )
         gain_rate = current_price / entry_price if entry_price > 0 else 0.0
-        trailing_rate = TRAILING_RATE
+        trailing_rate = trailing_rate_base
         crash_tightened = False
         if ENABLE_CRASH_PROTECTION and prev_close > 0:
             prev_close_change_pct = (current_price - prev_close) / prev_close
             if prev_close_change_pct <= CRASH_TIGHTEN_FROM_PREV_CLOSE_PCT:
-                trailing_rate = max(TRAILING_RATE, TRAILING_RATE_TIGHT)
+                trailing_rate = max(trailing_rate_base, TRAILING_RATE_TIGHT)
                 crash_tightened = True
 
         # 利益を伸ばす最適化: 平常時かつ強トレンドならトレーリングをやや緩める

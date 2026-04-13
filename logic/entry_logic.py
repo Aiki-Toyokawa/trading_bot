@@ -15,7 +15,6 @@ from app_settings import (
     MAX_ATR_PCT,
     MAX_PRICE_USD,
     MIN_ATR_PCT,
-    MAX_POSITIONS,
     MIN_AVG_VOLUME,
     MIN_ORDER_NOTIONAL_USD,
     MIN_PRICE_USD,
@@ -41,6 +40,7 @@ from app_settings import (
     STOP_LOSS_RATE,
     STRONG_TREND_THRESHOLD,
     VOLUME_SURGE_MULTIPLIER,
+    get_effective_max_positions,
 )
 
 
@@ -313,8 +313,9 @@ def pick_top_candidates(
     max_pick = len(buyables)
     if max_new_positions is not None:
         max_pick = min(max_pick, max_new_positions)
-    if MAX_POSITIONS > 0:
-        max_pick = min(max_pick, MAX_POSITIONS)
+    effective_max_positions = get_effective_max_positions()
+    if effective_max_positions > 0:
+        max_pick = min(max_pick, effective_max_positions)
     if CLAUDE_TOP_PICK_LIMIT > 0:
         max_pick = min(max_pick, CLAUDE_TOP_PICK_LIMIT)
     return buyables[:max_pick]

@@ -7,10 +7,6 @@ from app_settings import (
     ALPACA_DATA_FEED,
     DAILY_LOSS_LIMIT,
     ENABLE_SCORE_WEIGHTED_SIZING,
-    ENTRY_ORDER_MIN_SCORE,
-    FINVIZ_CANDIDATE_LIMIT,
-    MAX_NEW_ORDERS_PER_RUN,
-    MAX_POSITIONS,
     MIN_AVG_VOLUME,
     ORDER_EVENT_TYPES,
     SCORE_WEIGHT_FLOOR,
@@ -18,6 +14,10 @@ from app_settings import (
     TEST_ENTRY_ORDER_MIN_SCORE,
     TEST_MAX_NEW_ORDERS_PER_RUN_OVERRIDE,
     USE_PAPER_ACCOUNT,
+    get_effective_entry_order_min_score,
+    get_effective_finviz_candidate_limit,
+    get_effective_max_new_orders_per_run,
+    get_effective_max_positions,
     get_effective_min_avg_volume,
 )
 from logic.entry_logic import (
@@ -59,6 +59,11 @@ def run_entry_flow(
     allow_order_submission: bool = True,
 ) -> dict[str, Any]:
     _log(log_step_fn, "EntryFlow: 開始")
+    max_positions = get_effective_max_positions()
+    finviz_candidate_limit = get_effective_finviz_candidate_limit()
+    max_new_orders_per_run_base = get_effective_max_new_orders_per_run()
+    entry_order_min_score_base = get_effective_entry_order_min_score()
+
     account = alpaca_client.get_account()
     equity = max(_to_float(account.get("equity"), 0.0), 1.0)
     cash = max(_to_float(account.get("cash"), 0.0), 0.0)
@@ -79,10 +84,10 @@ def run_entry_flow(
     else:
         current_position_count = len(fetch_open_trades(db_path))
 
-    if MAX_POSITIONS > 0 and current_position_count >= MAX_POSITIONS:
+    if max_positions > 0 and current_position_count >= max_positions:
         _log(
             log_step_fn,
-            f"EntryFlow: 保有数が上限に到達 ({current_position_count}/{MAX_POSITIONS})",
+            f"EntryFlow: 保有数が上限に到達 ({current_position_count}/{max_positions})",
         )
         return {
             "note": "max_positions_reached",
@@ -90,8 +95,8 @@ def run_entry_flow(
         }
 
     max_new_positions: int | None = None
-    if MAX_POSITIONS > 0:
-        max_new_positions = max(0, MAX_POSITIONS - current_position_count)
+    if max_positions > 0:
+        max_new_positions = max(0, max_positions - current_position_count)
 
     open_buy_symbols: set[str] = set()
     if allow_order_submission:
@@ -104,7 +109,7 @@ def run_entry_flow(
             _log(log_step_fn, f"EntryFlow: 未約定BUY注文を検出 symbols={len(open_buy_symbols)}")
 
     _log(log_step_fn, "Finviz処理開始")
-    candidates = finviz_scraper.fetch_candidates(limit=FINVIZ_CANDIDATE_LIMIT)
+    candidates = finviz_scraper.fetch_candidates(limit=finviz_candidate_limit)
     _log(log_step_fn, f"Finviz処理完了: candidates={len(candidates)}")
     if not candidates:
         return {"note": "no_candidates"}
@@ -217,7 +222,7 @@ def run_entry_flow(
         rejected_reason_counts[reason] = rejected_reason_counts.get(reason, 0) + 1
 
     picks = pick_top_candidates(evaluated, max_new_positions=max_new_positions)
-    max_new_orders_per_run = MAX_NEW_ORDERS_PER_RUN
+    max_new_orders_per_run = max_new_orders_per_run_base
     if USE_PAPER_ACCOUNT and TEST_ENTRY_RELAX_MODE and TEST_MAX_NEW_ORDERS_PER_RUN_OVERRIDE > 0:
         max_new_orders_per_run = TEST_MAX_NEW_ORDERS_PER_RUN_OVERRIDE
     if max_new_orders_per_run > 0:
@@ -267,7 +272,7 @@ def run_entry_flow(
     bought = 0
     decision_buy_count = 0
     details: list[dict[str, Any]] = []
-    min_order_score = ENTRY_ORDER_MIN_SCORE
+    min_order_score = entry_order_min_score_base
     if USE_PAPER_ACCOUNT and TEST_ENTRY_RELAX_MODE:
         min_order_score = TEST_ENTRY_ORDER_MIN_SCORE
     for idx, (metrics, c_row, score, reason) in enumerate(picks):
