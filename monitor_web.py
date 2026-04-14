@@ -607,6 +607,30 @@ def build_system_only() -> dict[str, Any]:
     }
 
 
+def build_timing_only(db_path: Path) -> dict[str, Any]:
+    running_started = _get_running_main_started_utc()
+    market_timing = _build_market_timing_jst()
+    buy_timing = _build_task_timing(
+        db_path=db_path,
+        interval_sec=BUY_CHECK_INTERVAL_SECONDS,
+        running_started=running_started,
+        runtime_state_key="last_buy_check_at",
+    )
+    sell_timing = _build_task_timing(
+        db_path=db_path,
+        interval_sec=SELL_CHECK_INTERVAL_SECONDS,
+        running_started=running_started,
+        runtime_state_key="last_sell_check_at",
+    )
+    return {
+        "generated_at": _utc_now_iso(),
+        "market_timing": market_timing,
+        "buy_timing": buy_timing,
+        "sell_timing": sell_timing,
+        "run_timing": buy_timing,
+    }
+
+
 def _parse_limit(query: str, default: int, max_value: int = 200) -> int:
     params = parse_qs(query)
     raw = params.get("limit", [str(default)])[0]
@@ -734,7 +758,7 @@ HTML_PAGE = """<!doctype html>
     <table>
       <thead>
         <tr>
-          <th>ID</th><th>finished_at(JST)</th><th>status</th><th>label</th><th>mode</th><th>dur(s)</th>
+          <th>ID</th><th>finished_at(JST)</th><th>status</th><th>mode</th><th>dur(s)</th>
           <th>bought</th><th>sold</th><th>filled</th><th>note</th>
         </tr>
       </thead>
@@ -1084,13 +1108,12 @@ function renderRuns(runs) {
       <td>${esc(r.id)}</td>
       <td class="mono">${esc(fmtJstDateTime(r.finished_at))}</td>
       <td>${esc(r.status)}</td>
-      <td>${esc(getRunLabel(r))}</td>
       <td>${esc(r.execution_mode)}</td>
       <td>${num(r.duration_sec, 3)}</td>
       <td>${esc(r.bought_count)}</td>
       <td>${esc(r.sold_count)}</td>
       <td>${esc(r.filled_count)}</td>
-      <td>${esc(r.note)}</td>
+      <td>${esc((r.note ? String(r.note) + " | " : "") + getRunLabel(r))}</td>
     </tr>`).join("");
 }
 function renderLogs(logs) {
@@ -1254,10 +1277,19 @@ async function refreshSystemOnly() {
     console.error(e);
   }
 }
+async function refreshTimingOnly() {
+  try {
+    const payload = await getJson("/api/timing");
+    renderMarketRun(payload || {});
+  } catch (e) {
+    console.error(e);
+  }
+}
 refresh();
 setInterval(tickMarketRun, 100);
 setInterval(tickSystemLive, 100);
 setInterval(refreshSystemOnly, 2000);
+setInterval(refreshTimingOnly, 1000);
 setInterval(refresh, 5000);
 </script>
 </body>
@@ -1299,6 +1331,9 @@ class MonitorHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/system":
                 self._send_json(build_system_only())
+                return
+            if path == "/api/timing":
+                self._send_json(build_timing_only(self.db_path))
                 return
             if path == "/api/runs":
                 limit = _parse_limit(parsed.query, default=50, max_value=300)

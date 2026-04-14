@@ -395,12 +395,13 @@ def run_once() -> dict[str, Any]:
         f"run_exit={run_exit_enabled} run_entry={run_entry_enabled} "
         f"allow_order_submission={allow_order_submission}"
     )
+    cycle_epoch = time.time()
 
     log_section("Sync Flow")
     sync_result = run_sync_flow(DB_PATH, alpaca, log_step_fn=log_step)
 
     log_section("Exit Flow")
-    exit_check_at_epoch = time.time()
+    exit_check_at_epoch = cycle_epoch
     if run_exit_enabled:
         exit_result = run_exit_flow(
             DB_PATH,
@@ -415,7 +416,7 @@ def run_once() -> dict[str, Any]:
     log_step(f"ExitFlow完了: checked={exit_result.get('checked', 0)} sold={exit_result.get('sold', 0)}")
 
     log_section("Entry Flow")
-    now_epoch = time.time()
+    now_epoch = cycle_epoch
     last_buy_check_at_raw = _get_runtime_state_value(DB_PATH, "last_buy_check_at")
     last_buy_check_at_epoch = _to_float(last_buy_check_at_raw, 0.0)
     last_sell_check_at_raw = _get_runtime_state_value(DB_PATH, "last_sell_check_at")
@@ -451,7 +452,7 @@ def run_once() -> dict[str, Any]:
             log_step_fn=log_step,
             allow_order_submission=allow_order_submission,
         )
-        _set_runtime_state_value(DB_PATH, "last_buy_check_at", str(now_epoch))
+        _set_runtime_state_value(DB_PATH, "last_buy_check_at", str(cycle_epoch))
     else:
         log_step("EntryFlow: DEBUG_EXECUTION_MODE によりスキップ")
         entry_result = {"note": "skipped_by_debug_mode", "bought": 0, "rejected_count": 0}
