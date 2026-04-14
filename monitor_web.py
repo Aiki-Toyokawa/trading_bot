@@ -476,7 +476,13 @@ def _build_market_timing_jst() -> dict[str, Any]:
     }
 
 
-def _get_running_main_started_utc() -> datetime | None:
+def _get_running_main_started_utc(db_path: Path) -> datetime | None:
+    in_progress = _fetch_runtime_state_float(db_path, "run_in_progress")
+    if in_progress is not None and in_progress >= 1.0:
+        started_epoch = _fetch_runtime_state_float(db_path, "run_started_at_epoch")
+        if started_epoch is not None and started_epoch > 0:
+            return datetime.fromtimestamp(started_epoch, tz=timezone.utc)
+
     running_started: datetime | None = None
     if psutil is not None:
         try:
@@ -571,7 +577,7 @@ def build_summary(db_path: Path) -> dict[str, Any]:
     system = _get_system_metrics_cached(ttl_sec=5.0)
     last_connectivity = _fetch_latest_connectivity(db_path)
     market_timing = _build_market_timing_jst()
-    running_started = _get_running_main_started_utc()
+    running_started = _get_running_main_started_utc(db_path)
     buy_timing = _build_task_timing(
         db_path=db_path,
         interval_sec=BUY_CHECK_INTERVAL_SECONDS,
@@ -608,7 +614,7 @@ def build_system_only() -> dict[str, Any]:
 
 
 def build_timing_only(db_path: Path) -> dict[str, Any]:
-    running_started = _get_running_main_started_utc()
+    running_started = _get_running_main_started_utc(db_path)
     market_timing = _build_market_timing_jst()
     buy_timing = _build_task_timing(
         db_path=db_path,

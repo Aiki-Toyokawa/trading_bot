@@ -422,8 +422,8 @@ def run_once() -> dict[str, Any]:
     last_sell_check_at_raw = _get_runtime_state_value(DB_PATH, "last_sell_check_at")
     last_sell_check_at_epoch = _to_float(last_sell_check_at_raw, 0.0)
     next_buy_due_epoch = last_buy_check_at_epoch + float(BUY_CHECK_INTERVAL_SECONDS)
-    # systemdタイマーの揺らぎ吸収: 5%（最大10秒）の許容幅を持たせる
-    buy_interval_slack_sec = min(10.0, max(1.0, float(BUY_CHECK_INTERVAL_SECONDS) * 0.05))
+    # BUYはSELLとカウントダウン基準を揃えるため、早期実行の許容を最小にする
+    buy_interval_slack_sec = 0.25
     buy_interval_ready = (
         (last_buy_check_at_epoch <= 0.0)
         or ((now_epoch + buy_interval_slack_sec) >= next_buy_due_epoch)
@@ -538,11 +538,15 @@ def run_once() -> dict[str, Any]:
 
 def run_once_with_history() -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    started_epoch = time.time()
     started_perf = time.perf_counter()
     result: dict[str, Any] = {}
     error_text = ""
 
     try:
+        initialize_database()
+        _set_runtime_state_value(DB_PATH, "run_in_progress", "1")
+        _set_runtime_state_value(DB_PATH, "run_started_at_epoch", str(started_epoch))
         result = run_once()
     except Exception as exc:
         error_text = f"{type(exc).__name__}: {exc}"
@@ -561,9 +565,12 @@ def run_once_with_history() -> dict[str, Any]:
         }
     finally:
         finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        finished_epoch = time.time()
         duration_sec = time.perf_counter() - started_perf
         try:
             initialize_database()
+            _set_runtime_state_value(DB_PATH, "run_in_progress", "0")
+            _set_runtime_state_value(DB_PATH, "run_finished_at_epoch", str(finished_epoch))
             fields = _derive_run_history_fields(result, error_text)
             insert_run_history(
                 db_path=DB_PATH,
