@@ -1099,7 +1099,12 @@ function tickMarketRun() {
     } else {
       const remain = Math.max(target - now, 0);
       if (prefix === "sell") {
-        countdownEl.textContent = `次回まで ${fmtMsSecOnly(remain)}`;
+        const buyState = String(buy?.state || "UNKNOWN").toUpperCase();
+        const buyTarget = parseMs(buy?.target_at);
+        const buyRemain = (buyTarget !== null && buyState !== "RUNNING")
+          ? Math.max(buyTarget - now, 0)
+          : remain;
+        countdownEl.textContent = `次回まで ${fmtMsSecOnly(buyRemain)}`;
       } else {
         countdownEl.textContent = `次回まで ${fmtMs(remain)}`;
       }
