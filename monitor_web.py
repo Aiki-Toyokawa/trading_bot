@@ -476,30 +476,6 @@ def _build_market_timing_jst() -> dict[str, Any]:
     }
 
 
-def _get_running_main_started_utc(db_path: Path) -> datetime | None:
-    in_progress = _fetch_runtime_state_float(db_path, "run_in_progress")
-    if in_progress is not None and in_progress >= 1.0:
-        started_epoch = _fetch_runtime_state_float(db_path, "run_started_at_epoch")
-        if started_epoch is not None and started_epoch > 0:
-            return datetime.fromtimestamp(started_epoch, tz=timezone.utc)
-
-    running_started: datetime | None = None
-    if psutil is not None:
-        try:
-            for p in psutil.process_iter(attrs=["cmdline", "create_time"]):
-                cmdline = p.info.get("cmdline") or []
-                text = " ".join(str(x) for x in cmdline)
-                if "main.py" in text and "trading_bot" in text:
-                    created = _to_float(p.info.get("create_time"), 0.0)
-                    if created > 0:
-                        dt = datetime.fromtimestamp(created, tz=timezone.utc)
-                        if running_started is None or dt > running_started:
-                            running_started = dt
-        except Exception:
-            running_started = None
-    return running_started
-
-
 def _fetch_runtime_state_float(db_path: Path, state_key: str) -> float | None:
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
@@ -517,6 +493,20 @@ def _fetch_runtime_state_float(db_path: Path, state_key: str) -> float | None:
         return float(row[0])
     except (TypeError, ValueError):
         return None
+
+
+def _get_phase_running_started_utc(
+    db_path: Path,
+    in_progress_key: str,
+    started_epoch_key: str,
+) -> datetime | None:
+    in_progress = _fetch_runtime_state_float(db_path, in_progress_key)
+    if in_progress is None or in_progress < 1.0:
+        return None
+    started_epoch = _fetch_runtime_state_float(db_path, started_epoch_key)
+    if started_epoch is None or started_epoch <= 0.0:
+        return None
+    return datetime.fromtimestamp(started_epoch, tz=timezone.utc)
 
 
 def _build_task_timing(
@@ -577,17 +567,26 @@ def build_summary(db_path: Path) -> dict[str, Any]:
     system = _get_system_metrics_cached(ttl_sec=5.0)
     last_connectivity = _fetch_latest_connectivity(db_path)
     market_timing = _build_market_timing_jst()
-    running_started = _get_running_main_started_utc(db_path)
+    buy_running_started = _get_phase_running_started_utc(
+        db_path,
+        in_progress_key="buy_in_progress",
+        started_epoch_key="buy_started_at_epoch",
+    )
+    sell_running_started = _get_phase_running_started_utc(
+        db_path,
+        in_progress_key="sell_in_progress",
+        started_epoch_key="sell_started_at_epoch",
+    )
     buy_timing = _build_task_timing(
         db_path=db_path,
         interval_sec=BUY_CHECK_INTERVAL_SECONDS,
-        running_started=running_started,
+        running_started=buy_running_started,
         runtime_state_key="last_buy_check_at",
     )
     sell_timing = _build_task_timing(
         db_path=db_path,
         interval_sec=SELL_CHECK_INTERVAL_SECONDS,
-        running_started=running_started,
+        running_started=sell_running_started,
         runtime_state_key="last_sell_check_at",
     )
     return {
@@ -614,18 +613,27 @@ def build_system_only() -> dict[str, Any]:
 
 
 def build_timing_only(db_path: Path) -> dict[str, Any]:
-    running_started = _get_running_main_started_utc(db_path)
+    buy_running_started = _get_phase_running_started_utc(
+        db_path,
+        in_progress_key="buy_in_progress",
+        started_epoch_key="buy_started_at_epoch",
+    )
+    sell_running_started = _get_phase_running_started_utc(
+        db_path,
+        in_progress_key="sell_in_progress",
+        started_epoch_key="sell_started_at_epoch",
+    )
     market_timing = _build_market_timing_jst()
     buy_timing = _build_task_timing(
         db_path=db_path,
         interval_sec=BUY_CHECK_INTERVAL_SECONDS,
-        running_started=running_started,
+        running_started=buy_running_started,
         runtime_state_key="last_buy_check_at",
     )
     sell_timing = _build_task_timing(
         db_path=db_path,
         interval_sec=SELL_CHECK_INTERVAL_SECONDS,
-        running_started=running_started,
+        running_started=sell_running_started,
         runtime_state_key="last_sell_check_at",
     )
     return {

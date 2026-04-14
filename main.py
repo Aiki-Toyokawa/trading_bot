@@ -427,6 +427,8 @@ def run_once() -> dict[str, Any]:
         f"allow_order_submission={allow_order_submission}"
     )
     cycle_epoch = time.time()
+    _set_runtime_state_value(DB_PATH, "buy_in_progress", "0")
+    _set_runtime_state_value(DB_PATH, "sell_in_progress", "0")
 
     log_section("Sync Flow")
     sync_result = run_sync_flow(DB_PATH, alpaca, log_step_fn=log_step)
@@ -434,16 +436,22 @@ def run_once() -> dict[str, Any]:
     log_section("Exit Flow")
     exit_check_at_epoch = cycle_epoch
     if run_exit_enabled:
-        exit_result = run_exit_flow(
-            DB_PATH,
-            alpaca,
-            log_step_fn=log_step,
-            allow_order_submission=allow_order_submission,
-        )
-        _set_runtime_state_value(DB_PATH, "last_sell_check_at", str(exit_check_at_epoch))
+        _set_runtime_state_value(DB_PATH, "sell_in_progress", "1")
+        _set_runtime_state_value(DB_PATH, "sell_started_at_epoch", str(time.time()))
+        try:
+            exit_result = run_exit_flow(
+                DB_PATH,
+                alpaca,
+                log_step_fn=log_step,
+                allow_order_submission=allow_order_submission,
+            )
+            _set_runtime_state_value(DB_PATH, "last_sell_check_at", str(exit_check_at_epoch))
+        finally:
+            _set_runtime_state_value(DB_PATH, "sell_in_progress", "0")
     else:
         log_step("ExitFlow: DEBUG_EXECUTION_MODE によりスキップ")
         exit_result = {"note": "skipped_by_debug_mode", "checked": 0, "sold": 0}
+        _set_runtime_state_value(DB_PATH, "sell_in_progress", "0")
     log_step(f"ExitFlow完了: checked={exit_result.get('checked', 0)} sold={exit_result.get('sold', 0)}")
 
     log_section("Entry Flow")
@@ -475,18 +483,24 @@ def run_once() -> dict[str, Any]:
             "elapsed_since_last_buy_check_sec": round(elapsed_sec, 1),
         }
     elif run_entry_enabled:
-        entry_result = run_entry_flow(
-            DB_PATH,
-            alpaca,
-            finviz,
-            claude,
-            log_step_fn=log_step,
-            allow_order_submission=allow_order_submission,
-        )
-        _set_runtime_state_value(DB_PATH, "last_buy_check_at", str(cycle_epoch))
+        _set_runtime_state_value(DB_PATH, "buy_in_progress", "1")
+        _set_runtime_state_value(DB_PATH, "buy_started_at_epoch", str(time.time()))
+        try:
+            entry_result = run_entry_flow(
+                DB_PATH,
+                alpaca,
+                finviz,
+                claude,
+                log_step_fn=log_step,
+                allow_order_submission=allow_order_submission,
+            )
+            _set_runtime_state_value(DB_PATH, "last_buy_check_at", str(cycle_epoch))
+        finally:
+            _set_runtime_state_value(DB_PATH, "buy_in_progress", "0")
     else:
         log_step("EntryFlow: DEBUG_EXECUTION_MODE によりスキップ")
         entry_result = {"note": "skipped_by_debug_mode", "bought": 0, "rejected_count": 0}
+        _set_runtime_state_value(DB_PATH, "buy_in_progress", "0")
     log_step(
         "EntryFlow完了: "
         f"note={entry_result.get('note')} "
@@ -600,6 +614,8 @@ def run_once_with_history() -> dict[str, Any]:
         duration_sec = time.perf_counter() - started_perf
         try:
             initialize_database()
+            _set_runtime_state_value(DB_PATH, "buy_in_progress", "0")
+            _set_runtime_state_value(DB_PATH, "sell_in_progress", "0")
             _set_runtime_state_value(DB_PATH, "run_in_progress", "0")
             _set_runtime_state_value(DB_PATH, "run_finished_at_epoch", str(finished_epoch))
             fields = _derive_run_history_fields(result, error_text)
