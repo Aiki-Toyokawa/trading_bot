@@ -816,6 +816,12 @@ function fmtMs(ms) {
   const mmm = n % 1000;
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(mmm).padStart(3, "0")}`;
 }
+function fmtMsSecOnly(ms) {
+  const n = Math.max(0, Math.floor(Number(ms || 0)));
+  const ss = Math.floor((n % 60000) / 1000);
+  const mmm = n % 1000;
+  return `00:00:${String(ss).padStart(2, "0")}.${String(mmm).padStart(3, "0")}`;
+}
 function fmtJstLabel(iso) {
   const t = parseMs(iso);
   if (t === null) return "-";
@@ -1092,7 +1098,11 @@ function tickMarketRun() {
       countdownEl.textContent = `実行中 ${fmtMs(elapsed)}`;
     } else {
       const remain = Math.max(target - now, 0);
-      countdownEl.textContent = `次回まで ${fmtMs(remain)}`;
+      if (prefix === "sell") {
+        countdownEl.textContent = `次回まで ${fmtMsSecOnly(remain)}`;
+      } else {
+        countdownEl.textContent = `次回まで ${fmtMs(remain)}`;
+      }
     }
   }
 
@@ -1101,14 +1111,6 @@ function tickMarketRun() {
 }
 function renderRuns(runs) {
   const body = document.getElementById("runs-body");
-  function getRunLabel(r) {
-    const bought = Number(r?.bought_count || 0);
-    const sold = Number(r?.sold_count || 0);
-    if (bought > 0 && sold > 0) return "BUY+SELL run";
-    if (bought > 0) return "BUY run";
-    if (sold > 0) return "SELL run";
-    return "NO_FILL";
-  }
   body.innerHTML = (runs || []).map(r => `
     <tr>
       <td>${esc(r.id)}</td>
@@ -1119,7 +1121,7 @@ function renderRuns(runs) {
       <td>${esc(r.bought_count)}</td>
       <td>${esc(r.sold_count)}</td>
       <td>${esc(r.filled_count)}</td>
-      <td>${esc((r.note ? String(r.note) + " | " : "") + getRunLabel(r))}</td>
+      <td>${esc(r.note ?? "")}</td>
     </tr>`).join("");
 }
 function renderLogs(logs) {

@@ -229,6 +229,8 @@ def _derive_run_history_fields(result: dict[str, Any], error_text: str) -> dict[
     execution_mode = _to_int(debug.get("execution_mode"), DEBUG_EXECUTION_MODE)
     if execution_mode not in {0, 1, 2, 3}:
         execution_mode = 0
+    run_entry_enabled = execution_mode in {0, 1, 3}
+    run_exit_enabled = execution_mode in {0, 1, 2}
 
     sold_count = _to_int(exit_flow.get("sold"), 0)
     bought_count = _to_int(entry_flow.get("bought"), 0)
@@ -244,7 +246,16 @@ def _derive_run_history_fields(result: dict[str, Any], error_text: str) -> dict[
     )
     analysis_executed = not bool(analysis.get("skipped", False))
 
-    note = str(entry_flow.get("note") or exit_flow.get("note") or sync_flow.get("note") or "completed")
+    base_note = str(entry_flow.get("note") or exit_flow.get("note") or sync_flow.get("note") or "completed")
+    if run_entry_enabled and run_exit_enabled:
+        flow_note = "buy_and_sell_processed"
+    elif run_entry_enabled:
+        flow_note = "buy_processed"
+    elif run_exit_enabled:
+        flow_note = "sell_processed"
+    else:
+        flow_note = "no_flow_processed"
+    note = f"{flow_note} | {base_note}"
     status = "SUCCESS"
     if error_text:
         status = "ERROR"
