@@ -247,12 +247,32 @@ def _derive_run_history_fields(result: dict[str, Any], error_text: str) -> dict[
     analysis_executed = not bool(analysis.get("skipped", False))
 
     base_note = str(entry_flow.get("note") or exit_flow.get("note") or sync_flow.get("note") or "completed")
-    if run_entry_enabled and run_exit_enabled:
+
+    entry_note = str(entry_flow.get("note") or "")
+    exit_note = str(exit_flow.get("note") or "")
+
+    # 「有効だったか」ではなく「そのrunで実際に処理したか」で判定する
+    entry_skipped_notes = {
+        "skipped_by_debug_mode",
+        "skipped_market_closed",
+        "skipped_account_error",
+        "skipped_by_buy_interval",
+    }
+    exit_skipped_notes = {
+        "skipped_by_debug_mode",
+        "skipped_market_closed",
+        "skipped_account_error",
+    }
+
+    entry_processed = run_entry_enabled and entry_note not in entry_skipped_notes
+    exit_processed = run_exit_enabled and exit_note not in exit_skipped_notes
+
+    if entry_processed and exit_processed:
         flow_note = "buy_and_sell_processed"
-    elif run_entry_enabled:
-        flow_note = "buy_processed"
-    elif run_exit_enabled:
-        flow_note = "sell_processed"
+    elif entry_processed:
+        flow_note = "buy_only_processed"
+    elif exit_processed:
+        flow_note = "sell_only_processed"
     else:
         flow_note = "no_flow_processed"
     note = f"{flow_note} | {base_note}"
